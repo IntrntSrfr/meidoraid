@@ -13,16 +13,19 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/intrntsrfr/owo"
 	"golang.org/x/time/rate"
 )
 
 type Config struct {
-	Token string `json:"token"`
-	Owner string `json:"owner"`
+	Token  string `json:"token"`
+	Owner  string `json:"owner"`
+	OwoKey string `json:"owo_key"`
 }
 
 var (
 	servers = serverMap{servers: make(map[string]*server)}
+	oc      *owo.Client
 	config  Config
 )
 
@@ -41,6 +44,7 @@ func main() {
 		fmt.Println(err)
 		return
 	}
+	oc = owo.NewClient(config.OwoKey)
 
 	go servers.runCleaner()
 
@@ -103,7 +107,10 @@ func GuildMemberAddHandler(s *discordgo.Session, m *discordgo.GuildMemberAdd) {
 	}
 
 	if isNewAccount(m.User.ID) {
-		fmt.Println("new account")
+		fmt.Println("bad user", m.GuildID, m.User.ID)
+
+		srv.lastRaid[m.User.ID]=struct{}{}
+		//srv.lastRaid = append(srv.lastRaid, m.User.ID)
 		//s.GuildBanCreateWithReason(m.GuildID, m.User.ID, "Raid measure", 7)
 	}
 }
@@ -122,6 +129,19 @@ func RaidToggleHandler(s *discordgo.Session, m *discordgo.MessageCreate) {
 	if strings.HasPrefix(strings.ToLower(m.Content), "m?raidmode") {
 		srv.RaidToggle()
 		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("raid mode set to %v", srv.RaidMode()))
+	} else if strings.HasPrefix(strings.ToLower(m.Content), "m?lastraid") {
+		l := srv.GetLastRaid()
+		if len(l) <= 0 {
+			s.ChannelMessageSend(m.ChannelID, "no last raid")
+			return
+		}
+		res, err := oc.Upload(strings.Join(l, " "))
+		if err != nil {
+			s.ChannelMessageSend(m.ChannelID, "Error getting last raid. try again?")
+			return
+		}
+		s.ChannelMessageSend(m.ChannelID, res)
+
 	}
 }
 
@@ -144,7 +164,10 @@ func MessageCreateHandler(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 	if !usr.Allow() || len(m.Mentions) > 10 {
 		// ban the user
-		fmt.Println("bad user")
+		fmt.Println("bad user", m.GuildID, m.Author.ID)
+		srv.lastRaid[m.Author.ID]=struct{}{}
+		//srv.lastRaid = append(srv.lastRaid, m.Author.ID)
+		//s.GuildBanCreateWithReason(m.GuildID, m.User.ID, "Raid measure", 7)
 	}
 }
 
@@ -181,10 +204,13 @@ func (s *serverMap) Add(id string) {
 	s.Lock()
 	defer s.Unlock()
 	s.servers[id] = &server{
-		raidMode: false,
-		users:    make(map[string]*rate.Limiter),
-		lastRaid: []string{},
+		ID:          id,
+		raidMode:    false,
+		users:       make(map[string]*rate.Limiter),
+		joinedCache: []*cacheUser{},
+		lastRaid:    make(map[string]struct{}),
 	}
+	fmt.Println(fmt.Sprintf("added server id: %v", id))
 }
 func (s *serverMap) Remove(id string) {
 	s.Lock()
@@ -200,16 +226,18 @@ func (s *serverMap) Get(id string) (*server, bool) {
 
 type server struct {
 	sync.RWMutex
+	ID          string
 	raidMode    bool
 	users       map[string]*rate.Limiter
 	joinedCache []*cacheUser
-	lastRaid    []string
+	lastRaid    map[string]struct{}
 }
 
 func (s *server) Add(id string) {
 	s.Lock()
 	defer s.Unlock()
 	s.users[id] = rate.NewLimiter(1, 2)
+	fmt.Println(fmt.Sprintf("%v: added user limiter: %v", s.ID, id))
 }
 func (s *server) Remove(id string) {
 	s.Lock()
@@ -226,6 +254,21 @@ func (s *server) RaidMode() bool {
 	return s.raidMode
 }
 func (s *server) RaidToggle() {
+	if s.raidMode {
+		// raid mode is being turned off
+		s.users = make(map[string]*rate.Limiter)
+
+		for _, u := range s.joinedCache {
+			if isNewAccount(u.u) {
+				s.lastRaid[u.u]=struct{}{}
+			}
+		}
+
+	} else {
+		// raid mode is being turned on
+
+		s.lastRaid = make(map[string]struct{})
+	}
 	s.raidMode = !s.raidMode
 }
 func (s *server) AddToJoinCache(id string) {
@@ -235,18 +278,22 @@ func (s *server) AddToJoinCache(id string) {
 		u: id,
 		e: time.Now().Add(time.Hour).UnixNano(),
 	})
+	fmt.Sprintf("%v: added user to join cache: %v", s.ID, id)
 }
 
-/*
 func (s *server) GetLastRaid() []string {
-	return s.lastRaid
+	var l []string
+	for k := range s.lastRaid{
+		l = append(l, k)
+	}
+	return l
 }
-*/
 
 func (s *serverMap) removeOld() {
 	for _, v := range s.servers {
 		for i, v2 := range v.joinedCache {
 			if v2.Expired() {
+				fmt.Println(fmt.Sprintf("%v: user expired: %v", v.ID, v2.u))
 				v.joinedCache[i] = v.joinedCache[len(v.joinedCache)-1]
 				v.joinedCache[len(v.joinedCache)-1] = nil
 				v.joinedCache = v.joinedCache[:len(v.joinedCache)-1]
