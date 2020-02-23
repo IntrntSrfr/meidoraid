@@ -109,8 +109,7 @@ func GuildMemberAddHandler(s *discordgo.Session, m *discordgo.GuildMemberAdd) {
 	if isNewAccount(m.User.ID) {
 		fmt.Println("bad user", m.GuildID, m.User.ID)
 
-		srv.lastRaid[m.User.ID]=struct{}{}
-		//srv.lastRaid = append(srv.lastRaid, m.User.ID)
+		srv.lastRaid[m.User.ID] = struct{}{}
 		//s.GuildBanCreateWithReason(m.GuildID, m.User.ID, "Raid measure", 7)
 	}
 }
@@ -126,8 +125,25 @@ func RaidToggleHandler(s *discordgo.Session, m *discordgo.MessageCreate) {
 		return
 	}
 
+	perms, err := s.State.UserChannelPermissions(m.Author.ID, m.ChannelID)
+	if err != nil {
+		return
+	}
+	botPerms, err := s.State.UserChannelPermissions(s.State.User.ID, m.ChannelID)
+	if err != nil {
+		return
+	}
+
+	if perms&discordgo.PermissionBanMembers == 0 && perms&discordgo.PermissionAdministrator == 0 {
+		return
+	}
+
+	if botPerms&discordgo.PermissionBanMembers == 0 && perms&discordgo.PermissionAdministrator == 0 {
+		return
+	}
+
 	if strings.HasPrefix(strings.ToLower(m.Content), "m?raidmode") {
-		srv.RaidToggle()
+		srv.RaidToggle(s)
 		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("raid mode set to %v", srv.RaidMode()))
 	} else if strings.HasPrefix(strings.ToLower(m.Content), "m?lastraid") {
 		l := srv.GetLastRaid()
@@ -165,8 +181,7 @@ func MessageCreateHandler(s *discordgo.Session, m *discordgo.MessageCreate) {
 	if !usr.Allow() || len(m.Mentions) > 10 {
 		// ban the user
 		fmt.Println("bad user", m.GuildID, m.Author.ID)
-		srv.lastRaid[m.Author.ID]=struct{}{}
-		//srv.lastRaid = append(srv.lastRaid, m.Author.ID)
+		srv.lastRaid[m.Author.ID] = struct{}{}
 		//s.GuildBanCreateWithReason(m.GuildID, m.User.ID, "Raid measure", 7)
 	}
 }
@@ -207,7 +222,7 @@ func (s *serverMap) Add(id string) {
 		ID:          id,
 		raidMode:    false,
 		users:       make(map[string]*rate.Limiter),
-		joinedCache: []*cacheUser{},
+		joinedCache: make(map[string]*cacheUser),
 		lastRaid:    make(map[string]struct{}),
 	}
 	fmt.Println(fmt.Sprintf("added server id: %v", id))
@@ -229,14 +244,14 @@ type server struct {
 	ID          string
 	raidMode    bool
 	users       map[string]*rate.Limiter
-	joinedCache []*cacheUser
+	joinedCache map[string]*cacheUser
 	lastRaid    map[string]struct{}
 }
 
 func (s *server) Add(id string) {
 	s.Lock()
 	defer s.Unlock()
-	s.users[id] = rate.NewLimiter(1, 2)
+	s.users[id] = rate.NewLimiter(rate.Every(time.Second*2), 2)
 	fmt.Println(fmt.Sprintf("%v: added user limiter: %v", s.ID, id))
 }
 func (s *server) Remove(id string) {
@@ -253,37 +268,43 @@ func (s *server) GetUser(id string) (*rate.Limiter, bool) {
 func (s *server) RaidMode() bool {
 	return s.raidMode
 }
-func (s *server) RaidToggle() {
+func (s *server) RaidToggle(sess *discordgo.Session) {
 	if s.raidMode {
 		// raid mode is being turned off
 		s.users = make(map[string]*rate.Limiter)
 
-		for _, u := range s.joinedCache {
-			if isNewAccount(u.u) {
-				s.lastRaid[u.u]=struct{}{}
-			}
-		}
-
 	} else {
 		// raid mode is being turned on
 
+		// new lastraid map
 		s.lastRaid = make(map[string]struct{})
+
+		// look through join cache for new bad users and ban said users, and add them to the raidmap
+		for _, u := range s.joinedCache {
+			if isNewAccount(u.u) {
+				s.lastRaid[u.u] = struct{}{}
+
+				// ban the user
+				//sess.GuildBanCreateWithReason(s.ID, u.u, "Raid measure", 7)
+			}
+		}
+
 	}
 	s.raidMode = !s.raidMode
 }
 func (s *server) AddToJoinCache(id string) {
 	s.Lock()
 	defer s.Unlock()
-	s.joinedCache = append(s.joinedCache, &cacheUser{
+	s.joinedCache[id] = &cacheUser{
 		u: id,
 		e: time.Now().Add(time.Hour).UnixNano(),
-	})
-	fmt.Sprintf("%v: added user to join cache: %v", s.ID, id)
+	}
+	fmt.Println(fmt.Sprintf("%v: added user to join cache: %v", s.ID, id))
 }
 
 func (s *server) GetLastRaid() []string {
 	var l []string
-	for k := range s.lastRaid{
+	for k := range s.lastRaid {
 		l = append(l, k)
 	}
 	return l
@@ -291,14 +312,14 @@ func (s *server) GetLastRaid() []string {
 
 func (s *serverMap) removeOld() {
 	for _, v := range s.servers {
+		s.Lock()
 		for i, v2 := range v.joinedCache {
 			if v2.Expired() {
 				fmt.Println(fmt.Sprintf("%v: user expired: %v", v.ID, v2.u))
-				v.joinedCache[i] = v.joinedCache[len(v.joinedCache)-1]
-				v.joinedCache[len(v.joinedCache)-1] = nil
-				v.joinedCache = v.joinedCache[:len(v.joinedCache)-1]
+				delete(v.joinedCache, i)
 			}
 		}
+		s.Unlock()
 	}
 }
 
