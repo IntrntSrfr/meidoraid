@@ -336,6 +336,8 @@ func (s *server) RaidToggle(sess *discordgo.Session) {
 			if isNewAccount(u.u) {
 				s.lastRaid[u.u] = struct{}{}
 
+				delete(s.joinedCache, u.u)
+
 				// ban the user
 				//sess.GuildBanCreateWithReason(s.ID, u.u, "Raid measure", 7)
 			}
@@ -376,7 +378,7 @@ func (s *serverMap) removeOld() {
 }
 
 func (s *serverMap) runCleaner() {
-	t := time.NewTicker(time.Hour)
+	t := time.NewTicker(time.Minute*5)
 	for {
 		select {
 		case <-t.C:
