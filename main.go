@@ -121,10 +121,10 @@ func GuildMemberAddHandler(s *discordgo.Session, m *discordgo.GuildMemberAdd) {
 	}
 
 	if isNewAccount(m.User.ID) {
-		fmt.Println("bad user", m.GuildID, m.User.ID)
 
+		//fmt.Println("bad user", m.GuildID, m.User.ID)
 		srv.lastRaid[m.User.ID] = struct{}{}
-		//s.GuildBanCreateWithReason(m.GuildID, m.User.ID, "Raid measure", 7)
+		s.GuildBanCreateWithReason(m.GuildID, m.User.ID, "Raid measure", 7)
 	}
 }
 
@@ -211,9 +211,9 @@ func MessageCreateHandler(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 	if !usr.Allow() || len(m.Mentions) > 10 {
 		// ban the user
-		fmt.Println("bad user", m.GuildID, m.Author.ID)
+		//fmt.Println("bad user", m.GuildID, m.Author.ID)
 		srv.lastRaid[m.Author.ID] = struct{}{}
-		//s.GuildBanCreateWithReason(m.GuildID, m.User.ID, "Raid measure", 7)
+		s.GuildBanCreateWithReason(m.GuildID, m.Author.ID, "Raid measure", 7)
 	}
 }
 
@@ -276,7 +276,7 @@ func (s *serverMap) Add(id string) {
 			IgnoreRole:  srv.IgnoreRole,
 		}
 	}
-	fmt.Println(fmt.Sprintf("added server id: %v", id))
+	//fmt.Println(fmt.Sprintf("added server id: %v", id))
 }
 func (s *serverMap) Remove(id string) {
 	s.Lock()
@@ -304,7 +304,7 @@ func (s *server) Add(id string) {
 	s.Lock()
 	defer s.Unlock()
 	s.users[id] = rate.NewLimiter(rate.Every(time.Second*2), 2)
-	fmt.Println(fmt.Sprintf("%v: added user limiter: %v", s.id, id))
+	//fmt.Println(fmt.Sprintf("%v: added user limiter: %v", s.id, id))
 }
 func (s *server) Remove(id string) {
 	s.Lock()
@@ -339,7 +339,7 @@ func (s *server) RaidToggle(sess *discordgo.Session) {
 				delete(s.joinedCache, u.u)
 
 				// ban the user
-				//sess.GuildBanCreateWithReason(s.ID, u.u, "Raid measure", 7)
+				sess.GuildBanCreateWithReason(s.id, u.u, "Raid measure", 7)
 			}
 		}
 
@@ -353,7 +353,7 @@ func (s *server) AddToJoinCache(id string) {
 		u: id,
 		e: time.Now().Add(time.Hour).UnixNano(),
 	}
-	fmt.Println(fmt.Sprintf("%v: added user to join cache: %v", s.id, id))
+	//fmt.Println(fmt.Sprintf("%v: added user to join cache: %v", s.id, id))
 }
 
 func (s *server) GetLastRaid() []string {
@@ -365,11 +365,11 @@ func (s *server) GetLastRaid() []string {
 }
 
 func (s *serverMap) removeOld() {
-	for i, v := range s.Servers {
+	for _, v := range s.Servers {
 		s.Lock()
 		for j, v2 := range v.joinedCache {
 			if v2.Expired() {
-				fmt.Println(fmt.Sprintf("%v: user expired: %v", i, v2.u))
+				//fmt.Println(fmt.Sprintf("%v: user expired: %v", i, v2.u))
 				delete(v.joinedCache, j)
 			}
 		}
