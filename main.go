@@ -24,10 +24,20 @@ type Config struct {
 }
 
 var (
-	servers = serverMap{servers: make(map[string]*server)}
+	servers = &serverMap{Servers: make(map[string]*server)}
 	oc      *owo.Client
 	config  Config
 )
+
+func (s *serverMap) save() {
+	d, _ := json.Marshal(s)
+	ioutil.WriteFile("./test.json", d, 0644)
+}
+
+func (s *serverMap) load() {
+	d, _ := ioutil.ReadFile("./test.json")
+	json.Unmarshal(d, s)
+}
 
 func main() {
 	f, err := ioutil.ReadFile("./config.json")
@@ -38,6 +48,9 @@ func main() {
 
 	var config Config
 	json.Unmarshal(f, &config)
+
+	servers.load()
+	defer servers.save()
 
 	client, err := discordgo.New("Bot " + config.Token)
 	if err != nil {
@@ -55,13 +68,14 @@ func main() {
 		fmt.Println(err)
 		return
 	}
+	defer client.Close()
 
 	fmt.Println("Bot is now running.  Press CTRL-C to exit.")
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt, os.Kill)
 	<-sc
 
-	client.Close()
+
 }
 
 func addHandlers(s *discordgo.Session) {
@@ -116,7 +130,7 @@ func GuildMemberAddHandler(s *discordgo.Session, m *discordgo.GuildMemberAdd) {
 
 func RaidToggleHandler(s *discordgo.Session, m *discordgo.MessageCreate) {
 
-	if m.Author.Bot {
+	if m.Author.Bot || len(m.Content) <= 0 {
 		return
 	}
 
@@ -142,10 +156,13 @@ func RaidToggleHandler(s *discordgo.Session, m *discordgo.MessageCreate) {
 		return
 	}
 
-	if strings.HasPrefix(strings.ToLower(m.Content), "m?raidmode") {
+	args := strings.Fields(m.Content)
+
+	switch strings.ToLower(args[0]) {
+	case "m?raidmode":
 		srv.RaidToggle(s)
 		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("raid mode set to %v", srv.RaidMode()))
-	} else if strings.HasPrefix(strings.ToLower(m.Content), "m?lastraid") {
+	case "m?lastraid":
 		l := srv.GetLastRaid()
 		if len(l) <= 0 {
 			s.ChannelMessageSend(m.ChannelID, "no last raid")
@@ -157,11 +174,21 @@ func RaidToggleHandler(s *discordgo.Session, m *discordgo.MessageCreate) {
 			return
 		}
 		s.ChannelMessageSend(m.ChannelID, res)
-
+	case "m?raidignore":
+		if len(args) < 2 {
+			return
+		}
+		srv.IgnoreRole = args[1]
+		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("raid will ignore users with role id: %v", args[1]))
+	default:
+		return
 	}
 }
 
 func MessageCreateHandler(s *discordgo.Session, m *discordgo.MessageCreate) {
+	if m.Author.Bot {
+		return
+	}
 
 	srv, ok := servers.Get(m.GuildID)
 	if !ok {
@@ -169,6 +196,10 @@ func MessageCreateHandler(s *discordgo.Session, m *discordgo.MessageCreate) {
 	}
 
 	if !srv.RaidMode() {
+		return
+	}
+
+	if hasRole(m.Member, srv.IgnoreRole) {
 		return
 	}
 
@@ -206,53 +237,74 @@ func isNewAccount(userID string) bool {
 	return false
 }
 
-func hasRole() bool {
+func hasRole(m *discordgo.Member, role string) bool {
+	if role == "" {
+		return false
+	}
+	for _, r := range m.Roles {
+		if r == role {
+			return true
+		}
+	}
 	return false
 }
 
 type serverMap struct {
 	sync.RWMutex
-	servers map[string]*server
+	Servers map[string]*server
 }
 
 func (s *serverMap) Add(id string) {
 	s.Lock()
 	defer s.Unlock()
-	s.servers[id] = &server{
-		ID:          id,
-		raidMode:    false,
-		users:       make(map[string]*rate.Limiter),
-		joinedCache: make(map[string]*cacheUser),
-		lastRaid:    make(map[string]struct{}),
+	srv, found := s.Servers[id]
+	if !found {
+		s.Servers[id] = &server{
+			id:          id,
+			raidMode:    false,
+			users:       make(map[string]*rate.Limiter),
+			joinedCache: make(map[string]*cacheUser),
+			lastRaid:    make(map[string]struct{}),
+		}
+	} else {
+		s.Servers[id] = &server{
+			id:          id,
+			raidMode:    false,
+			users:       make(map[string]*rate.Limiter),
+			joinedCache: make(map[string]*cacheUser),
+			lastRaid:    make(map[string]struct{}),
+			IgnoreRole:  srv.IgnoreRole,
+		}
 	}
 	fmt.Println(fmt.Sprintf("added server id: %v", id))
 }
 func (s *serverMap) Remove(id string) {
 	s.Lock()
 	defer s.Unlock()
-	delete(s.servers, id)
+	delete(s.Servers, id)
 }
 func (s *serverMap) Get(id string) (*server, bool) {
 	s.RLock()
 	defer s.RUnlock()
-	val, ok := s.servers[id]
+	val, ok := s.Servers[id]
 	return val, ok
 }
 
 type server struct {
 	sync.RWMutex
-	ID          string
+	id          string
 	raidMode    bool
 	users       map[string]*rate.Limiter
 	joinedCache map[string]*cacheUser
 	lastRaid    map[string]struct{}
+	IgnoreRole  string
 }
 
 func (s *server) Add(id string) {
 	s.Lock()
 	defer s.Unlock()
 	s.users[id] = rate.NewLimiter(rate.Every(time.Second*2), 2)
-	fmt.Println(fmt.Sprintf("%v: added user limiter: %v", s.ID, id))
+	fmt.Println(fmt.Sprintf("%v: added user limiter: %v", s.id, id))
 }
 func (s *server) Remove(id string) {
 	s.Lock()
@@ -299,7 +351,7 @@ func (s *server) AddToJoinCache(id string) {
 		u: id,
 		e: time.Now().Add(time.Hour).UnixNano(),
 	}
-	fmt.Println(fmt.Sprintf("%v: added user to join cache: %v", s.ID, id))
+	fmt.Println(fmt.Sprintf("%v: added user to join cache: %v", s.id, id))
 }
 
 func (s *server) GetLastRaid() []string {
@@ -311,12 +363,12 @@ func (s *server) GetLastRaid() []string {
 }
 
 func (s *serverMap) removeOld() {
-	for _, v := range s.servers {
+	for i, v := range s.Servers {
 		s.Lock()
-		for i, v2 := range v.joinedCache {
+		for j, v2 := range v.joinedCache {
 			if v2.Expired() {
-				fmt.Println(fmt.Sprintf("%v: user expired: %v", v.ID, v2.u))
-				delete(v.joinedCache, i)
+				fmt.Println(fmt.Sprintf("%v: user expired: %v", i, v2.u))
+				delete(v.joinedCache, j)
 			}
 		}
 		s.Unlock()
