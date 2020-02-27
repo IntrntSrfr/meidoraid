@@ -27,15 +27,16 @@ var (
 	servers = &serverMap{Servers: make(map[string]*server)}
 	oc      *owo.Client
 	config  Config
+	banChan = make(chan [2]string)
 )
 
 func (s *serverMap) save() {
 	d, _ := json.Marshal(s)
-	ioutil.WriteFile("./test.json", d, 0644)
+	ioutil.WriteFile("./data.json", d, 0644)
 }
 
 func (s *serverMap) load() {
-	d, _ := ioutil.ReadFile("./test.json")
+	d, _ := ioutil.ReadFile("./data.json")
 	json.Unmarshal(d, s)
 }
 
@@ -60,6 +61,7 @@ func main() {
 	oc = owo.NewClient(config.OwoKey)
 
 	go servers.runCleaner()
+	go runBanListener(client)
 
 	addHandlers(client)
 
@@ -75,7 +77,6 @@ func main() {
 	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt, os.Kill)
 	<-sc
 
-
 }
 
 func addHandlers(s *discordgo.Session) {
@@ -87,6 +88,7 @@ func addHandlers(s *discordgo.Session) {
 	s.AddHandler(GuildUnavailableHandler)
 
 	s.AddHandler(GuildMemberAddHandler)
+	s.AddHandler(AutoDetectHandler)
 	s.AddHandler(RaidToggleHandler)
 	s.AddHandler(MessageCreateHandler)
 }
@@ -124,7 +126,38 @@ func GuildMemberAddHandler(s *discordgo.Session, m *discordgo.GuildMemberAdd) {
 
 		//fmt.Println("bad user", m.GuildID, m.User.ID)
 		srv.lastRaid[m.User.ID] = struct{}{}
-		s.GuildBanCreateWithReason(m.GuildID, m.User.ID, "Raid measure", 7)
+		banChan <- [2]string{m.GuildID, m.User.ID}
+		//s.GuildBanCreateWithReason(m.GuildID, m.User.ID, "Raid measure", 7)
+	}
+}
+func AutoDetectHandler(s *discordgo.Session, m *discordgo.GuildMemberAdd) {
+
+	srv, ok := servers.Get(m.GuildID)
+	if !ok {
+		return
+	}
+
+	if srv.RaidMode() || !srv.AutoDetect {
+		return
+	}
+
+	if !srv.joinLimiter.Allow() {
+		srv.RaidToggle()
+		time.AfterFunc(time.Minute*5, func() {
+			if srv.raidMode {
+				srv.RaidToggle()
+			}
+		})
+	}
+}
+
+func runBanListener(s *discordgo.Session) {
+	for {
+		select {
+		case ban := <-banChan:
+			//fmt.Println("time to ban: ", ban)
+			s.GuildBanCreateWithReason(ban[0], ban[1], "Raid measure", 7)
+		}
 	}
 }
 
@@ -160,7 +193,7 @@ func RaidToggleHandler(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 	switch strings.ToLower(args[0]) {
 	case "m?raidmode":
-		srv.RaidToggle(s)
+		srv.RaidToggle()
 		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("raid mode set to %v", srv.RaidMode()))
 	case "m?lastraid":
 		l := srv.GetLastRaid()
@@ -180,6 +213,9 @@ func RaidToggleHandler(s *discordgo.Session, m *discordgo.MessageCreate) {
 		}
 		srv.IgnoreRole = args[1]
 		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("raid will ignore users with role id: %v", args[1]))
+	case "m?autoraid":
+		srv.ToggleAutodetect()
+		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("raid autodetect set to: %v", srv.AutoDetect))
 	default:
 		return
 	}
@@ -213,7 +249,8 @@ func MessageCreateHandler(s *discordgo.Session, m *discordgo.MessageCreate) {
 		// ban the user
 		//fmt.Println("bad user", m.GuildID, m.Author.ID)
 		srv.lastRaid[m.Author.ID] = struct{}{}
-		s.GuildBanCreateWithReason(m.GuildID, m.Author.ID, "Raid measure", 7)
+		banChan <- [2]string{m.GuildID, m.Author.ID}
+		//s.GuildBanCreateWithReason(m.GuildID, m.Author.ID, "Raid measure", 7)
 	}
 }
 
@@ -265,6 +302,8 @@ func (s *serverMap) Add(id string) {
 			users:       make(map[string]*rate.Limiter),
 			joinedCache: make(map[string]*cacheUser),
 			lastRaid:    make(map[string]struct{}),
+			joinLimiter: rate.NewLimiter(2, 10),
+			AutoDetect:  false,
 		}
 	} else {
 		s.Servers[id] = &server{
@@ -274,6 +313,8 @@ func (s *serverMap) Add(id string) {
 			joinedCache: make(map[string]*cacheUser),
 			lastRaid:    make(map[string]struct{}),
 			IgnoreRole:  srv.IgnoreRole,
+			joinLimiter: rate.NewLimiter(2, 10),
+			AutoDetect:  srv.AutoDetect,
 		}
 	}
 	//fmt.Println(fmt.Sprintf("added server id: %v", id))
@@ -298,6 +339,8 @@ type server struct {
 	joinedCache map[string]*cacheUser
 	lastRaid    map[string]struct{}
 	IgnoreRole  string
+	joinLimiter *rate.Limiter
+	AutoDetect  bool
 }
 
 func (s *server) Add(id string) {
@@ -317,10 +360,16 @@ func (s *server) GetUser(id string) (*rate.Limiter, bool) {
 	val, ok := s.users[id]
 	return val, ok
 }
+func (s *server) Autodetect() bool {
+	return s.AutoDetect
+}
+func (s *server) ToggleAutodetect() {
+	s.AutoDetect = !s.AutoDetect
+}
 func (s *server) RaidMode() bool {
 	return s.raidMode
 }
-func (s *server) RaidToggle(sess *discordgo.Session) {
+func (s *server) RaidToggle() {
 	if s.raidMode {
 		// raid mode is being turned off
 		s.users = make(map[string]*rate.Limiter)
@@ -339,7 +388,8 @@ func (s *server) RaidToggle(sess *discordgo.Session) {
 				delete(s.joinedCache, u.u)
 
 				// ban the user
-				sess.GuildBanCreateWithReason(s.id, u.u, "Raid measure", 7)
+				banChan <- [2]string{s.id, u.u}
+				//sess.GuildBanCreateWithReason(s.id, u.u, "Raid measure", 7)
 			}
 		}
 
@@ -378,7 +428,7 @@ func (s *serverMap) removeOld() {
 }
 
 func (s *serverMap) runCleaner() {
-	t := time.NewTicker(time.Minute*5)
+	t := time.NewTicker(time.Minute * 5)
 	for {
 		select {
 		case <-t.C:
