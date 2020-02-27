@@ -27,7 +27,7 @@ var (
 	servers = &serverMap{Servers: make(map[string]*server)}
 	oc      *owo.Client
 	config  Config
-	banChan = make(chan [2]string)
+	banChan = make(chan [2]string, 64)
 )
 
 func (s *serverMap) save() {
