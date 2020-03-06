@@ -27,7 +27,7 @@ var (
 	servers = &serverMap{Servers: make(map[string]*server)}
 	oc      *owo.Client
 	config  Config
-	banChan = make(chan [2]string, 64)
+	banChan = make(chan [2]string, 1024)
 )
 
 func (s *serverMap) save() {
@@ -313,7 +313,7 @@ func (s *serverMap) Add(id string) {
 			joinedCache: make(map[string]*cacheUser),
 			lastRaid:    make(map[string]struct{}),
 			IgnoreRole:  srv.IgnoreRole,
-			joinLimiter: rate.NewLimiter(2, 10),
+			joinLimiter: rate.NewLimiter(0.25, 5),
 			AutoDetect:  srv.AutoDetect,
 		}
 	}
@@ -370,6 +370,7 @@ func (s *server) RaidMode() bool {
 	return s.raidMode
 }
 func (s *server) RaidToggle() {
+	s.Lock()
 	if s.raidMode {
 		// raid mode is being turned off
 		s.users = make(map[string]*rate.Limiter)
@@ -395,6 +396,7 @@ func (s *server) RaidToggle() {
 
 	}
 	s.raidMode = !s.raidMode
+	s.Unlock()
 }
 func (s *server) AddToJoinCache(id string) {
 	s.Lock()
